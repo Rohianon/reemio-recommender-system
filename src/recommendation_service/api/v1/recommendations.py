@@ -17,11 +17,6 @@ from recommendation_service.services.recommendation_engine_v2 import (
 router = APIRouter()
 
 
-# =============================================================================
-# Response Models
-# =============================================================================
-
-
 class RecommendedProduct(BaseModel):
     """A recommended product with relevance score."""
 
@@ -43,11 +38,6 @@ class RecommendationResponse(BaseModel):
     context: str
     user_id: str | None = None
     generated_at: str
-
-
-# =============================================================================
-# Endpoints
-# =============================================================================
 
 
 @router.get("/homepage", response_model=RecommendationResponse)

@@ -8,7 +8,7 @@ A production-ready recommendation system for the Reemio e-commerce platform, pro
 - **Email Campaigns**: Cart abandonment, new products, weekly digest, and back-in-stock notifications
 - **Analytics Dashboard**: Track most viewed, recommended, and purchased products
 - **Feedback Loop**: Continuous improvement through user interaction tracking
-- **Vector Search**: Semantic product similarity using Pinecone
+- **Vector Search**: Semantic product similarity using sentence embeddings
 - **Production Ready**: Kubernetes deployment, comprehensive testing, monitoring
 
 ## Architecture
@@ -30,7 +30,7 @@ A production-ready recommendation system for the Reemio e-commerce platform, pro
                      |                 |                |
                      v                 v                v
               +------+------+   +------+------+   +----+----+
-              | PostgreSQL  |   |   Pinecone  |   |  Redis  |
+              | PostgreSQL  |   |  pgvector   |   |  Redis  |
               +-------------+   +-------------+   +---------+
 ```
 
@@ -39,89 +39,79 @@ A production-ready recommendation system for the Reemio e-commerce platform, pro
 | Component | Technology |
 |-----------|------------|
 | API Framework | FastAPI (Python 3.11+) |
-| Vector Database | Pinecone (llama-text-embed-v2) |
+| Vector Search | pgvector (PostgreSQL extension) |
+| Embeddings | sentence-transformers (all-MiniLM-L6-v2) |
+| Reranking | cross-encoder (ms-marco-MiniLM-L-6-v2) |
 | Relational DB | PostgreSQL 15 |
 | Cache/Queue | Redis 7 |
 | Task Queue | Celery |
-| Containerization | Docker |
-| Orchestration | Kubernetes |
+| Package Manager | uv |
 
 ## Quick Start
 
 ### Prerequisites
 
 - Python 3.11+
-- Docker & Docker Compose
-- PostgreSQL 15+
-- Redis 7+
-- Pinecone account
+- PostgreSQL 15+ with pgvector extension
+- Redis 7+ (optional, for caching)
+- uv (Python package manager)
 
-### Local Development Setup
-
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/reemio/reemio-recommender-system.git
-   cd reemio-recommender-system
-   ```
-
-2. **Set up Python environment**
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-   pip install -e ".[dev]"
-   ```
-
-3. **Configure environment**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your credentials
-   ```
-
-4. **Start infrastructure services**
-   ```bash
-   docker-compose up -d postgres redis
-   ```
-
-5. **Set up Pinecone indexes**
-   ```bash
-   # Install Pinecone CLI
-   brew tap pinecone-io/tap && brew install pinecone-io/tap/pinecone
-
-   # Authenticate
-   pc auth configure --api-key $PINECONE_API_KEY
-
-   # Create indexes
-   ./scripts/setup_pinecone.sh
-   ```
-
-6. **Run database migrations**
-   ```bash
-   alembic upgrade head
-   ```
-
-7. **Start the API server**
-   ```bash
-   make run-api
-   # Or: uvicorn recommendation_service.main:app --reload
-   ```
-
-8. **Start workers (in separate terminals)**
-   ```bash
-   make run-email-worker
-   make run-sync-worker
-   ```
-
-### Using Docker Compose (Full Stack)
+### Installation
 
 ```bash
-# Start all services
-docker-compose up -d
+# Clone the repository
+git clone https://github.com/reemio/reemio-recommender-system.git
+cd reemio-recommender-system
 
-# View logs
-docker-compose logs -f api
+# Install uv if not already installed
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Stop services
-docker-compose down
+# Create virtual environment and install dependencies
+uv venv
+source .venv/bin/activate
+uv sync
+```
+
+### Configuration
+
+```bash
+# Copy example environment file
+cp .env.example .env
+
+# Edit with your database credentials
+# Required variables:
+#   POSTGRES_HOST, POSTGRES_PORT, POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
+```
+
+### Database Setup
+
+```bash
+# Run database migrations
+uv run alembic upgrade head
+
+# Sync products from e-commerce API (generates embeddings)
+uv run python -m scripts.sync_products
+```
+
+### Start the API Server
+
+```bash
+# Development mode with auto-reload
+uv run uvicorn src.recommendation_service.main:app --reload --host 0.0.0.0 --port 8000
+
+# Or use the Makefile
+make run-api
+```
+
+### Start the Frontend
+
+```bash
+# Serve the frontend (in a separate terminal)
+cd frontend
+python3 -m http.server 8080
+
+# Open in browser
+open http://localhost:8080
 ```
 
 ## API Endpoints
@@ -130,7 +120,7 @@ docker-compose down
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/v1/recommendations/homepage` | GET | Personalized homepage recommendations |
+| `/api/v1/recommendations/homepage` | GET | Popular/personalized homepage recommendations |
 | `/api/v1/recommendations/product/{id}` | GET | Similar products |
 | `/api/v1/recommendations/cart` | GET | Cart-based recommendations |
 | `/api/v1/recommendations/frequently-bought-together/{id}` | GET | Co-purchase suggestions |
@@ -149,14 +139,15 @@ docker-compose down
 | `/api/v1/analytics/products/top-viewed` | GET | Most viewed products |
 | `/api/v1/analytics/products/top-recommended` | GET | Most recommended products |
 | `/api/v1/analytics/products/top-purchased` | GET | Best sellers |
-| `/api/v1/analytics/recommendations/performance` | GET | CTR and conversion metrics |
-| `/api/v1/analytics/conversion-funnel` | GET | View→Cart→Purchase funnel |
 
 ### Example Requests
 
 ```bash
 # Get homepage recommendations
-curl -X GET "http://localhost:8000/api/v1/recommendations/homepage?user_id=user123&limit=12"
+curl "http://localhost:8000/api/v1/recommendations/homepage?limit=12"
+
+# Get similar products
+curl "http://localhost:8000/api/v1/recommendations/product/{product_id}?limit=8"
 
 # Track a product view
 curl -X POST "http://localhost:8000/api/v1/interactions" \
@@ -166,10 +157,106 @@ curl -X POST "http://localhost:8000/api/v1/interactions" \
     "product_id": "prod456",
     "interaction_type": "view"
   }'
-
-# Get top viewed products
-curl -X GET "http://localhost:8000/api/v1/analytics/products/top-viewed?limit=20"
 ```
+
+## Project Structure
+
+```
+reemio-recommender-system/
+├── src/
+│   ├── recommendation_service/    # FastAPI application
+│   │   ├── api/v1/               # API endpoints
+│   │   ├── services/             # Business logic (recommendation engine)
+│   │   ├── infrastructure/       # DB, Redis connections
+│   │   └── config.py             # Configuration management
+│   ├── email_worker/             # Celery email tasks
+│   └── sync_worker/              # Data sync tasks
+├── frontend/                      # Demo frontend
+├── tests/                         # Test suites
+├── k8s/                           # Kubernetes manifests
+├── docker/                        # Docker configuration
+├── scripts/                       # Utility scripts
+└── docs/                          # Documentation
+```
+
+## Development
+
+### Running Tests
+
+```bash
+# Run all tests
+uv run pytest
+
+# Run with coverage
+uv run pytest --cov=src
+
+# Run specific test file
+uv run pytest tests/unit/test_recommendation_engine.py -v
+```
+
+### Code Quality
+
+```bash
+# Format code
+uv run ruff format src
+
+# Lint code
+uv run ruff check src
+
+# Type checking
+uv run mypy src
+```
+
+### Database Migrations
+
+```bash
+# Create new migration
+uv run alembic revision --autogenerate -m "description"
+
+# Apply migrations
+uv run alembic upgrade head
+
+# Rollback
+uv run alembic downgrade -1
+```
+
+## How It Works
+
+### Recommendation Pipeline
+
+The recommendation engine uses a 4-stage hybrid pipeline:
+
+1. **Candidate Generation**: Fast retrieval using:
+   - Content-based: Semantic similarity via embeddings
+   - Collaborative: User behavior patterns
+   - Popularity: Fallback for cold-start
+
+2. **Hybrid Scoring**: Blends multiple signals:
+   ```
+   score = 0.5 × content + 0.3 × collaborative + 0.2 × popularity
+   ```
+
+3. **Reranking**: Cross-encoder model for precise ordering
+
+4. **Business Rules**: Diversity limits, stock filtering
+
+### Embedding Model
+
+Products are embedded using `sentence-transformers/all-MiniLM-L6-v2`:
+- 384-dimensional vectors
+- Cosine similarity for matching
+- Stored in PostgreSQL with pgvector
+
+### Personalization
+
+When user interaction data exists:
+- User preferences are computed from interaction history
+- Collaborative filtering finds similar users
+- Recommendations blend user preferences with content similarity
+
+Without user data:
+- Falls back to popularity-based recommendations
+- Still provides relevant results based on product embeddings
 
 ## Email Workflows
 
@@ -180,53 +267,21 @@ curl -X GET "http://localhost:8000/api/v1/analytics/products/top-viewed?limit=20
 | Weekly Digest | Sunday 10AM, active users | Personalized picks |
 | Back in Stock | Inventory update, user showed interest | Stock notification |
 
-## Development
-
-### Running Tests
-
-```bash
-# Run all tests
-make test
-
-# Run with coverage
-make test-cov
-
-# Run specific test categories
-pytest tests/unit -v
-pytest tests/integration -v
-pytest tests/e2e -v
-```
-
-### Code Quality
-
-```bash
-# Format code
-make format
-
-# Run linter
-make lint
-
-# Type checking
-make typecheck
-
-# Run all checks
-make check
-```
-
-### Database Migrations
-
-```bash
-# Create new migration
-alembic revision --autogenerate -m "description"
-
-# Apply migrations
-alembic upgrade head
-
-# Rollback
-alembic downgrade -1
-```
-
 ## Deployment
+
+### Using Docker Compose
+
+```bash
+# Start all services
+cd docker
+docker-compose up -d
+
+# View logs
+docker-compose logs -f api
+
+# Stop services
+docker-compose down
+```
 
 ### Kubernetes
 
@@ -241,35 +296,19 @@ kubectl apply -k k8s/overlays/production
 kubectl get pods -n reemio-recommender
 ```
 
-### Environment Variables
+## Environment Variables
 
-See `.env.example` for all configuration options. Key variables:
-
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `POSTGRES_HOST` | PostgreSQL host | Yes |
-| `PINECONE_API_KEY` | Pinecone API key | Yes |
-| `REDIS_HOST` | Redis host | Yes |
-| `ECOMMERCE_API_BASE_URL` | E-commerce API URL | Yes |
-
-## Project Structure
-
-```
-reemio-recommender-system/
-├── src/
-│   ├── recommendation_service/    # FastAPI application
-│   │   ├── api/v1/               # API endpoints
-│   │   ├── services/             # Business logic
-│   │   ├── repositories/         # Data access
-│   │   └── infrastructure/       # DB, Pinecone, Redis
-│   ├── email_worker/             # Celery email tasks
-│   └── sync_worker/              # Data sync tasks
-├── tests/                        # Test suites
-├── k8s/                          # Kubernetes manifests
-├── docker/                       # Docker configuration
-├── scripts/                      # Utility scripts
-└── docs/                         # Documentation
-```
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `POSTGRES_HOST` | PostgreSQL host | localhost |
+| `POSTGRES_PORT` | PostgreSQL port | 5432 |
+| `POSTGRES_USER` | Database user | - |
+| `POSTGRES_PASSWORD` | Database password | - |
+| `POSTGRES_DB` | Database name | - |
+| `REDIS_HOST` | Redis host | localhost |
+| `REDIS_PORT` | Redis port | 6379 |
+| `APP_ENV` | Environment (development/production) | development |
+| `DEBUG` | Enable debug mode | false |
 
 ## Contributing
 

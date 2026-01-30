@@ -10,7 +10,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from recommendation_service.api.v1.router import api_router
 from recommendation_service.config import get_settings
 
-# Configure structured logging
 structlog.configure(
     processors=[
         structlog.contextvars.merge_contextvars,
@@ -39,18 +38,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         debug=settings.debug,
     )
 
-    # Startup: Initialize connections
-    # TODO: Initialize database connection pool
-    # TODO: Initialize Pinecone client
-    # TODO: Initialize Redis client
-
     yield
 
-    # Shutdown: Close connections
     logger.info("Shutting down Reemio Recommender Service")
-    # TODO: Close database connections
-    # TODO: Close Pinecone client
-    # TODO: Close Redis client
 
 
 def create_app() -> FastAPI:
@@ -67,7 +57,6 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # Add CORS middleware
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
@@ -76,13 +65,11 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Include API router
     app.include_router(api_router, prefix="/api/v1")
 
     return app
 
 
-# Create app instance
 app = create_app()
 
 

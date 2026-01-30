@@ -1,11 +1,4 @@
-"""Hybrid recommendation engine with 4-stage pipeline.
-
-Pipeline stages:
-1. Candidate Generation - Fast retrieval (content + collaborative)
-2. Hybrid Scoring - Blend multiple signals
-3. Reranking - Cross-encoder for precise ordering
-4. Business Rules - Diversity, freshness, stock filters
-"""
+"""Hybrid recommendation engine with 4-stage pipeline."""
 
 import json
 import math
@@ -27,10 +20,9 @@ logger = structlog.get_logger()
 class HybridRecommendationEngine:
     """Hybrid recommendation engine with content + collaborative filtering."""
 
-    # Hybrid scoring weights (α, β, γ)
-    CONTENT_WEIGHT = 0.5  # Embedding similarity
-    COLLABORATIVE_WEIGHT = 0.3  # Co-purchase, similar users
-    POPULARITY_WEIGHT = 0.2  # Global popularity
+    CONTENT_WEIGHT = 0.5
+    COLLABORATIVE_WEIGHT = 0.3
+    POPULARITY_WEIGHT = 0.2
 
     def __init__(self, session: AsyncSession, enable_reranking: bool = True):
         self.session = session
@@ -39,42 +31,55 @@ class HybridRecommendationEngine:
 
     async def get_homepage_recommendations(
         self,
-        user_id: str,
+        user_id: str | None = None,
         limit: int = 12,
         diversity_limit_per_category: int = 3,
     ) -> dict[str, Any]:
-        """Get personalized homepage recommendations."""
+        """Get homepage recommendations - personalized if user data exists, otherwise popular."""
         request_id = str(uuid4())
 
-        # Stage 1: Candidate Generation
-        candidates = await self._generate_candidates_for_user(
-            user_id, candidate_limit=limit * 5
-        )
+        candidates = []
+        has_user_data = False
+
+        if user_id:
+            user_embedding = await self._get_user_embedding(user_id)
+            if user_embedding:
+                has_user_data = True
+                content_candidates = await self._search_similar_products(
+                    user_embedding, limit=limit * 3, exclude_ids=[]
+                )
+                candidates.extend(content_candidates)
+
+            collab_candidates = await self._get_collaborative_candidates(user_id, limit=limit * 2)
+            if collab_candidates:
+                has_user_data = True
+                candidates.extend(collab_candidates)
 
         if not candidates:
-            # Fallback to popular products
             candidates = await self._get_popular_products(limit=limit * 2)
 
-        # Stage 2: Hybrid Scoring
-        candidates = await self._apply_hybrid_scoring(candidates, user_id)
+        candidates = self._deduplicate_candidates(candidates)
 
-        # Stage 3: Reranking
-        if self.reranker:
-            user_prefs = await self._get_user_preference_data(user_id)
-            query = self.reranker.create_query_from_user_context(
-                user_categories=user_prefs.get("top_categories"),
-                context="homepage recommendations",
-            )
-            candidates = self.reranker.rerank(query, candidates, top_k=limit * 2)
+        if has_user_data:
+            candidates = self._apply_hybrid_scoring(candidates)
+            if self.reranker:
+                user_prefs = await self._get_user_preference_data(user_id)
+                if user_prefs.get("top_categories"):
+                    query = self.reranker.create_query_from_user_context(
+                        user_categories=user_prefs.get("top_categories"),
+                        context="homepage recommendations",
+                    )
+                    candidates = self._rerank_and_normalize(query, candidates, top_k=limit * 2)
+        else:
+            candidates = self._normalize_popularity_scores(candidates)
 
-        # Stage 4: Business Rules
         candidates = self._apply_diversity(candidates, diversity_limit_per_category)
         candidates = self._apply_business_rules(candidates)
         candidates = candidates[:limit]
 
-        # Add position
         for i, p in enumerate(candidates):
             p["position"] = i + 1
+            p["score"] = max(0.0, min(1.0, p.get("score", 0.5)))
 
         return {
             "recommendations": candidates,
@@ -93,12 +98,10 @@ class HybridRecommendationEngine:
         """Get products similar to a given product."""
         request_id = str(uuid4())
 
-        # Get source product
         source_product = await self._get_product_by_external_id(product_id)
         if not source_product:
             return self._empty_response(request_id, "product_page", user_id)
 
-        # Stage 1: Candidate Generation (content-based)
         candidates = []
         source_embedding = source_product.get("embedding")
 
@@ -111,26 +114,22 @@ class HybridRecommendationEngine:
                 source_product.get("category"), limit=limit * 2, exclude_ids=[product_id]
             )
 
-        # Add collaborative signal (frequently bought together)
-        collaborative_candidates = await self._get_co_purchased_products(
-            product_id, limit=limit
-        )
-        candidates.extend(collaborative_candidates)
+        co_purchased = await self._get_co_purchased_products(product_id, limit=limit)
+        candidates.extend(co_purchased)
 
-        # Stage 2: Hybrid Scoring
-        candidates = await self._apply_hybrid_scoring(candidates, user_id, source_product)
+        candidates = self._deduplicate_candidates(candidates, exclude_ids=[product_id])
+        candidates = self._apply_hybrid_scoring(candidates)
 
-        # Stage 3: Reranking
-        if self.reranker:
+        if self.reranker and source_product.get("name"):
             query = f"{source_product['name']} {source_product.get('category', '')}"
-            candidates = self.reranker.rerank(query, candidates, top_k=limit * 2)
+            candidates = self._rerank_and_normalize(query, candidates, top_k=limit * 2)
 
-        # Stage 4: Business Rules
         candidates = self._apply_business_rules(candidates)
         candidates = candidates[:limit]
 
         for i, p in enumerate(candidates):
             p["position"] = i + 1
+            p["score"] = max(0.0, min(1.0, p.get("score", 0.5)))
 
         return {
             "recommendations": candidates,
@@ -149,53 +148,40 @@ class HybridRecommendationEngine:
         """Get recommendations based on cart contents."""
         request_id = str(uuid4())
 
-        # Stage 1: Candidate Generation
-        # Content-based: aggregate cart embeddings
         cart_embeddings = []
+        cart_categories = set()
         for pid in cart_product_ids:
             product = await self._get_product_by_external_id(pid)
-            if product and product.get("embedding"):
-                cart_embeddings.append(product["embedding"])
+            if product:
+                if product.get("embedding"):
+                    cart_embeddings.append(product["embedding"])
+                if product.get("category"):
+                    cart_categories.add(product["category"])
 
         candidates = []
         if cart_embeddings:
             aggregated = self._aggregate_embeddings(cart_embeddings)
             candidates = await self._search_similar_products(
-                aggregated,
-                limit=limit * 4,
-                exclude_ids=cart_product_ids,
+                aggregated, limit=limit * 4, exclude_ids=cart_product_ids
             )
 
-        # Collaborative: products bought with cart items
-        for cart_pid in cart_product_ids[:3]:  # Check top 3 cart items
-            collab_products = await self._get_co_purchased_products(
-                cart_pid, limit=limit
-            )
+        for cart_pid in cart_product_ids[:3]:
+            collab_products = await self._get_co_purchased_products(cart_pid, limit=limit)
             candidates.extend(collab_products)
 
-        # Deduplicate
-        seen = set()
-        unique_candidates = []
-        for c in candidates:
-            if c["product_id"] not in seen and c["product_id"] not in cart_product_ids:
-                seen.add(c["product_id"])
-                unique_candidates.append(c)
-        candidates = unique_candidates
+        candidates = self._deduplicate_candidates(candidates, exclude_ids=cart_product_ids)
+        candidates = self._apply_hybrid_scoring(candidates)
 
-        # Stage 2: Hybrid Scoring
-        candidates = await self._apply_hybrid_scoring(candidates, user_id)
+        if self.reranker and cart_categories:
+            query = f"Products complementary to {', '.join(list(cart_categories)[:3])}"
+            candidates = self._rerank_and_normalize(query, candidates, top_k=limit * 2)
 
-        # Stage 3: Reranking
-        if self.reranker and candidates:
-            query = "Cart completion recommendations"
-            candidates = self.reranker.rerank(query, candidates, top_k=limit * 2)
-
-        # Stage 4: Business Rules
         candidates = self._apply_business_rules(candidates)
         candidates = candidates[:limit]
 
         for i, p in enumerate(candidates):
             p["position"] = i + 1
+            p["score"] = max(0.0, min(1.0, p.get("score", 0.5)))
 
         return {
             "recommendations": candidates,
@@ -205,235 +191,155 @@ class HybridRecommendationEngine:
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    # =========================================================================
-    # Stage 1: Candidate Generation
-    # =========================================================================
-
-    async def _generate_candidates_for_user(
-        self, user_id: str, candidate_limit: int = 50
-    ) -> list[dict[str, Any]]:
-        """Generate candidates using both content and collaborative signals."""
-        candidates = []
-
-        # Content-based: user preference embedding
-        user_embedding = await self._get_user_embedding(user_id)
-        if user_embedding:
-            content_candidates = await self._search_similar_products(
-                user_embedding, limit=candidate_limit // 2, exclude_ids=[]
-            )
-            candidates.extend(content_candidates)
-
-        # Collaborative: products from similar users
-        collaborative_candidates = await self._get_collaborative_candidates(
-            user_id, limit=candidate_limit // 2
-        )
-        candidates.extend(collaborative_candidates)
-
-        return candidates
-
-    async def _get_collaborative_candidates(
-        self, user_id: str, limit: int = 25
-    ) -> list[dict[str, Any]]:
-        """Get recommendations based on similar users (collaborative filtering)."""
-        # Find products purchased by users with similar interaction patterns
-        query = text("""
-            WITH user_products AS (
-                -- Products this user has interacted with
-                SELECT DISTINCT external_product_id
-                FROM recommender.user_interactions
-                WHERE external_user_id = :user_id
-            ),
-            similar_users AS (
-                -- Users who interacted with same products
-                SELECT
-                    ui.external_user_id,
-                    COUNT(DISTINCT ui.external_product_id) as overlap
-                FROM recommender.user_interactions ui
-                WHERE ui.external_product_id IN (SELECT external_product_id FROM user_products)
-                AND ui.external_user_id != :user_id
-                GROUP BY ui.external_user_id
-                HAVING COUNT(DISTINCT ui.external_product_id) >= 2
-                ORDER BY overlap DESC
-                LIMIT 10
-            ),
-            recommended_products AS (
-                -- Products similar users liked that this user hasn't seen
-                SELECT
-                    ui.external_product_id,
-                    COUNT(*) as frequency
-                FROM recommender.user_interactions ui
-                WHERE ui.external_user_id IN (SELECT external_user_id FROM similar_users)
-                AND ui.external_product_id NOT IN (SELECT external_product_id FROM user_products)
-                AND ui.interaction_type IN ('PURCHASE', 'CART_ADD', 'WISHLIST_ADD')
-                GROUP BY ui.external_product_id
-                ORDER BY frequency DESC
-                LIMIT :limit
-            )
-            SELECT
-                pe.external_product_id as product_id,
-                pe.name,
-                pe.category,
-                pe.price_cents,
-                pe.popularity_score,
-                rp.frequency as collaborative_score
-            FROM recommended_products rp
-            JOIN recommender.product_embeddings pe ON pe.external_product_id = rp.external_product_id
-            WHERE pe.is_active = true
-        """)
-
-        result = await self.session.execute(query, {"user_id": user_id, "limit": limit})
-        rows = result.fetchall()
-
-        return [
-            {
-                "product_id": str(r.product_id),
-                "external_product_id": r.product_id,
-                "name": r.name,
-                "category": r.category or "Unknown",
-                "price": r.price_cents / 100,
-                "image_url": None,
-                "score": float(r.collaborative_score) / 10.0,  # Normalize
-                "signal": "collaborative",
-            }
-            for r in rows
-        ]
-
-    async def _get_co_purchased_products(
-        self, product_id: str, limit: int = 10
-    ) -> list[dict[str, Any]]:
-        """Get products frequently bought together."""
-        query = text("""
-            WITH source_orders AS (
-                SELECT DISTINCT oi."orderId"
-                FROM public.order_items oi
-                WHERE oi."productId" = :product_id
-            )
-            SELECT
-                pe.external_product_id as product_id,
-                pe.name,
-                pe.category,
-                pe.price_cents,
-                COUNT(*) as frequency
-            FROM public.order_items oi
-            JOIN source_orders so ON oi."orderId" = so."orderId"
-            JOIN recommender.product_embeddings pe ON pe.external_product_id = oi."productId"
-            WHERE oi."productId" != :product_id
-            AND pe.is_active = true
-            GROUP BY pe.external_product_id, pe.name, pe.category, pe.price_cents
-            ORDER BY frequency DESC
-            LIMIT :limit
-        """)
-
-        result = await self.session.execute(
-            query, {"product_id": product_id, "limit": limit}
-        )
-        rows = result.fetchall()
-
-        return [
-            {
-                "product_id": str(r.product_id),
-                "external_product_id": r.product_id,
-                "name": r.name,
-                "category": r.category or "Unknown",
-                "price": r.price_cents / 100,
-                "image_url": None,
-                "score": float(r.frequency),
-                "signal": "co_purchase",
-            }
-            for r in rows
-        ]
-
-    # =========================================================================
-    # Stage 2: Hybrid Scoring
-    # =========================================================================
-
-    async def _apply_hybrid_scoring(
+    async def get_frequently_bought_together(
         self,
-        candidates: list[dict[str, Any]],
-        user_id: str | None = None,
-        context_product: dict[str, Any] | None = None,
+        product_id: str,
+        limit: int = 4,
+    ) -> dict[str, Any]:
+        """Get products frequently bought together with the given product."""
+        request_id = str(uuid4())
+
+        candidates = await self._get_co_purchased_products(product_id, limit=limit * 2)
+
+        if len(candidates) < limit:
+            source_product = await self._get_product_by_external_id(product_id)
+            if source_product and source_product.get("embedding"):
+                similar = await self._search_similar_products(
+                    source_product["embedding"],
+                    limit=limit - len(candidates),
+                    exclude_ids=[product_id] + [c["product_id"] for c in candidates],
+                )
+                candidates.extend(similar)
+
+        candidates = self._deduplicate_candidates(candidates, exclude_ids=[product_id])
+
+        max_score = max((c.get("score", 1) for c in candidates), default=1) or 1
+        for c in candidates:
+            c["score"] = max(0.0, min(1.0, c.get("score", 0.5) / max_score))
+
+        candidates = candidates[:limit]
+        for i, p in enumerate(candidates):
+            p["position"] = i + 1
+
+        return {
+            "recommendations": candidates,
+            "request_id": request_id,
+            "context": "frequently_bought_together",
+            "user_id": None,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def _deduplicate_candidates(
+        self, candidates: list[dict[str, Any]], exclude_ids: list[str] | None = None
     ) -> list[dict[str, Any]]:
-        """Apply hybrid scoring: α×content + β×collaborative + γ×popularity."""
+        """Remove duplicate products from candidates."""
+        exclude_ids = exclude_ids or []
+        seen = set()
+        unique = []
+        for c in candidates:
+            pid = c.get("product_id")
+            if pid and pid not in seen and pid not in exclude_ids:
+                seen.add(pid)
+                unique.append(c)
+        return unique
+
+    def _apply_hybrid_scoring(self, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Apply hybrid scoring and normalize to 0-1 range."""
         if not candidates:
             return []
 
-        # Normalize scores by signal type
-        content_candidates = [c for c in candidates if c.get("signal") != "collaborative"]
-        collab_candidates = [c for c in candidates if c.get("signal") == "collaborative"]
+        content_candidates = [c for c in candidates if c.get("signal") in ("content", "category")]
+        collab_candidates = [c for c in candidates if c.get("signal") in ("collaborative", "co_purchase")]
+        pop_candidates = [c for c in candidates if c.get("signal") == "popularity"]
 
-        # Normalize content scores (cosine similarity typically 0-1)
         if content_candidates:
-            max_content = max(c.get("score", 0) for c in content_candidates) or 1.0
+            max_score = max(abs(c.get("score", 0)) for c in content_candidates) or 1.0
             for c in content_candidates:
-                c["content_score"] = c.get("score", 0) / max_content
+                c["content_score"] = max(0.0, c.get("score", 0)) / max_score
 
-        # Normalize collaborative scores
         if collab_candidates:
-            max_collab = max(c.get("score", 0) for c in collab_candidates) or 1.0
+            max_score = max(c.get("score", 0) for c in collab_candidates) or 1.0
             for c in collab_candidates:
-                c["collaborative_score"] = c.get("score", 0) / max_collab
+                c["collaborative_score"] = c.get("score", 0) / max_score
 
-        # Get popularity scores (already normalized 0-1 in DB)
+        if pop_candidates:
+            max_score = max(c.get("score", 0) for c in pop_candidates) or 1.0
+            for c in pop_candidates:
+                c["popularity_score"] = c.get("score", 0) / max_score
+
         for c in candidates:
-            if "popularity_score" not in c:
-                # Fetch from DB if needed
-                c["popularity_score"] = 0.5  # Default
+            content = c.get("content_score", 0)
+            collab = c.get("collaborative_score", 0)
+            pop = c.get("popularity_score", c.get("score", 0.5))
 
-        # Calculate hybrid score
-        for c in candidates:
-            content_score = c.get("content_score", c.get("score", 0))
-            collab_score = c.get("collaborative_score", 0)
-            pop_score = c.get("popularity_score", 0.5)
+            if c.get("signal") == "popularity":
+                c["score"] = pop
+            else:
+                hybrid = (
+                    self.CONTENT_WEIGHT * content
+                    + self.COLLABORATIVE_WEIGHT * collab
+                    + self.POPULARITY_WEIGHT * pop
+                )
+                c["score"] = max(0.0, min(1.0, hybrid))
 
-            hybrid_score = (
-                self.CONTENT_WEIGHT * content_score
-                + self.COLLABORATIVE_WEIGHT * collab_score
-                + self.POPULARITY_WEIGHT * pop_score
-            )
-
-            c["hybrid_score"] = hybrid_score
-            c["score"] = hybrid_score  # Update main score
-
-        # Sort by hybrid score
-        candidates.sort(key=lambda x: x["hybrid_score"], reverse=True)
-
+        candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
         return candidates
 
-    # =========================================================================
-    # Stage 4: Business Rules
-    # =========================================================================
+    def _normalize_popularity_scores(self, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Normalize popularity scores to 0-1 range."""
+        if not candidates:
+            return []
+
+        max_score = max(c.get("score", 0) for c in candidates) or 1.0
+        min_score = min(c.get("score", 0) for c in candidates)
+        score_range = max_score - min_score or 1.0
+
+        for c in candidates:
+            raw = c.get("score", 0)
+            c["score"] = (raw - min_score) / score_range
+
+        candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
+        return candidates
+
+    def _rerank_and_normalize(
+        self, query: str, candidates: list[dict[str, Any]], top_k: int
+    ) -> list[dict[str, Any]]:
+        """Rerank candidates and normalize scores to 0-1."""
+        if not self.reranker or not candidates:
+            return candidates
+
+        reranked = self.reranker.rerank(query, candidates, top_k=top_k)
+
+        if reranked:
+            scores = [c.get("score", 0) for c in reranked]
+            min_score = min(scores)
+            max_score = max(scores)
+            score_range = max_score - min_score if max_score != min_score else 1.0
+
+            for c in reranked:
+                raw = c.get("score", 0)
+                c["score"] = (raw - min_score) / score_range
+
+        return reranked
 
     def _apply_diversity(
         self, candidates: list[dict[str, Any]], limit_per_category: int
     ) -> list[dict[str, Any]]:
         """Apply diversity by limiting items per category."""
         category_counts: dict[str, int] = defaultdict(int)
-        diverse_candidates = []
+        diverse = []
 
         for candidate in candidates:
             category = candidate.get("category", "Unknown")
             if category_counts[category] < limit_per_category:
-                diverse_candidates.append(candidate)
+                diverse.append(candidate)
                 category_counts[category] += 1
 
-        return diverse_candidates
+        return diverse
 
     def _apply_business_rules(self, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Apply business rules (boost new, penalize out-of-stock, etc)."""
-        # Filter out of stock
-        candidates = [c for c in candidates if c.get("stock", 1) > 0]
-
-        # Could add more rules:
-        # - Boost products with high margin
-        # - Boost products on sale
-        # - Penalize recently returned items
-        # - Boost new arrivals
-
-        return candidates
-
-    # =========================================================================
-    # Helper Methods
-    # =========================================================================
+        """Apply business rules."""
+        return [c for c in candidates if c.get("stock", 1) > 0]
 
     async def _get_user_embedding(self, user_id: str) -> list[float] | None:
         """Get user preference embedding."""
@@ -452,7 +358,7 @@ class HybridRecommendationEngine:
         return None
 
     async def _get_user_preference_data(self, user_id: str) -> dict[str, Any]:
-        """Get user preference data (categories, price range, etc)."""
+        """Get user preference data."""
         query = text("""
             SELECT top_categories, avg_price_min, avg_price_max
             FROM recommender.user_preference_embeddings
@@ -465,7 +371,6 @@ class HybridRecommendationEngine:
             top_categories = row.top_categories
             if isinstance(top_categories, str):
                 top_categories = json.loads(top_categories)
-
             return {
                 "top_categories": top_categories or [],
                 "avg_price_min": row.avg_price_min,
@@ -473,12 +378,108 @@ class HybridRecommendationEngine:
             }
         return {"top_categories": [], "avg_price_min": None, "avg_price_max": None}
 
+    async def _get_collaborative_candidates(
+        self, user_id: str, limit: int = 25
+    ) -> list[dict[str, Any]]:
+        """Get recommendations based on similar users."""
+        query = text("""
+            WITH user_products AS (
+                SELECT DISTINCT external_product_id
+                FROM recommender.user_interactions
+                WHERE external_user_id = :user_id
+            ),
+            similar_users AS (
+                SELECT ui.external_user_id, COUNT(DISTINCT ui.external_product_id) as overlap
+                FROM recommender.user_interactions ui
+                WHERE ui.external_product_id IN (SELECT external_product_id FROM user_products)
+                AND ui.external_user_id != :user_id
+                GROUP BY ui.external_user_id
+                HAVING COUNT(DISTINCT ui.external_product_id) >= 2
+                ORDER BY overlap DESC
+                LIMIT 10
+            ),
+            recommended_products AS (
+                SELECT ui.external_product_id, COUNT(*) as frequency
+                FROM recommender.user_interactions ui
+                WHERE ui.external_user_id IN (SELECT external_user_id FROM similar_users)
+                AND ui.external_product_id NOT IN (SELECT external_product_id FROM user_products)
+                AND ui.interaction_type IN ('PURCHASE', 'CART_ADD', 'WISHLIST_ADD')
+                GROUP BY ui.external_product_id
+                ORDER BY frequency DESC
+                LIMIT :limit
+            )
+            SELECT
+                pe.external_product_id as product_id, pe.name, pe.category,
+                pe.price_cents, pe.popularity_score, pe.stock, rp.frequency as score
+            FROM recommended_products rp
+            JOIN recommender.product_embeddings pe ON pe.external_product_id = rp.external_product_id
+            WHERE pe.is_active = true
+        """)
+
+        result = await self.session.execute(query, {"user_id": user_id, "limit": limit})
+        rows = result.fetchall()
+
+        return [
+            {
+                "product_id": str(r.product_id),
+                "external_product_id": r.product_id,
+                "name": r.name,
+                "category": r.category or "Unknown",
+                "price": r.price_cents / 100,
+                "stock": r.stock,
+                "image_url": None,
+                "score": float(r.score),
+                "popularity_score": r.popularity_score,
+                "signal": "collaborative",
+            }
+            for r in rows
+        ]
+
+    async def _get_co_purchased_products(
+        self, product_id: str, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Get products frequently bought together."""
+        query = text("""
+            WITH source_orders AS (
+                SELECT DISTINCT oi."orderId"
+                FROM public.order_items oi
+                WHERE oi."productId" = :product_id
+            )
+            SELECT
+                pe.external_product_id as product_id, pe.name, pe.category,
+                pe.price_cents, pe.stock, COUNT(*) as frequency
+            FROM public.order_items oi
+            JOIN source_orders so ON oi."orderId" = so."orderId"
+            JOIN recommender.product_embeddings pe ON pe.external_product_id = oi."productId"
+            WHERE oi."productId" != :product_id AND pe.is_active = true
+            GROUP BY pe.external_product_id, pe.name, pe.category, pe.price_cents, pe.stock
+            ORDER BY frequency DESC
+            LIMIT :limit
+        """)
+
+        result = await self.session.execute(query, {"product_id": product_id, "limit": limit})
+        rows = result.fetchall()
+
+        return [
+            {
+                "product_id": str(r.product_id),
+                "external_product_id": r.product_id,
+                "name": r.name,
+                "category": r.category or "Unknown",
+                "price": r.price_cents / 100,
+                "stock": r.stock,
+                "image_url": None,
+                "score": float(r.frequency),
+                "signal": "co_purchase",
+            }
+            for r in rows
+        ]
+
     async def _get_product_by_external_id(self, external_id: str) -> dict[str, Any] | None:
         """Get product by external ID."""
         query = text("""
-            SELECT
-                id, external_product_id, name, category, price_cents, stock,
-                is_active, embedding, popularity_score
+            SELECT id, external_product_id, name, category, price_cents, stock,
+                   is_active, embedding, popularity_score
             FROM recommender.product_embeddings
             WHERE external_product_id = :external_id
         """)
@@ -505,58 +506,56 @@ class HybridRecommendationEngine:
         return None
 
     async def _search_similar_products(
-        self, query_embedding: list[float], limit: int = 12, exclude_ids: list[str] = None
+        self, query_embedding: list[float], limit: int = 12, exclude_ids: list[str] | None = None
     ) -> list[dict[str, Any]]:
-        """Search for products similar to query embedding."""
+        """Search for products similar to query embedding using cosine similarity."""
         exclude_ids = exclude_ids or []
+        candidate_limit = min(limit * 10, 200)
 
         query = text("""
-            SELECT
-                external_product_id, name, category, price_cents,
-                is_active, embedding, popularity_score, stock
+            SELECT external_product_id, name, category, price_cents,
+                   embedding, popularity_score, stock
             FROM recommender.product_embeddings
-            WHERE is_active = true
-            AND embedding IS NOT NULL
+            WHERE is_active = true AND embedding IS NOT NULL
             AND external_product_id != ALL(:exclude_ids)
+            ORDER BY popularity_score DESC NULLS LAST
+            LIMIT :candidate_limit
         """)
-        result = await self.session.execute(query, {"exclude_ids": exclude_ids})
+        result = await self.session.execute(
+            query, {"exclude_ids": exclude_ids, "candidate_limit": candidate_limit}
+        )
         rows = result.fetchall()
 
-        scored_products = []
+        scored = []
         for row in rows:
             embedding = row.embedding
             if isinstance(embedding, str):
                 embedding = json.loads(embedding)
-
-            if embedding:
+            if isinstance(embedding, list) and embedding:
                 similarity = self._cosine_similarity(query_embedding, embedding)
-                scored_products.append(
-                    {
-                        "product_id": str(row.external_product_id),
-                        "external_product_id": row.external_product_id,
-                        "name": row.name,
-                        "category": row.category or "Unknown",
-                        "price": row.price_cents / 100,
-                        "stock": row.stock,
-                        "image_url": None,
-                        "score": similarity,
-                        "popularity_score": row.popularity_score,
-                        "signal": "content",
-                    }
-                )
+                scored.append({
+                    "product_id": str(row.external_product_id),
+                    "external_product_id": row.external_product_id,
+                    "name": row.name,
+                    "category": row.category or "Unknown",
+                    "price": row.price_cents / 100,
+                    "stock": row.stock,
+                    "image_url": None,
+                    "score": similarity,
+                    "popularity_score": row.popularity_score,
+                    "signal": "content",
+                })
 
-        scored_products.sort(key=lambda x: x["score"], reverse=True)
-        return scored_products[:limit]
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        return scored[:limit]
 
     async def _get_popular_products(self, limit: int = 12) -> list[dict[str, Any]]:
         """Get popular products as fallback."""
         query = text("""
-            SELECT
-                external_product_id, name, category, price_cents,
-                is_active, popularity_score, stock
+            SELECT external_product_id, name, category, price_cents, popularity_score, stock
             FROM recommender.product_embeddings
             WHERE is_active = true AND stock > 0
-            ORDER BY popularity_score DESC, id
+            ORDER BY popularity_score DESC NULLS LAST, id
             LIMIT :limit
         """)
         result = await self.session.execute(query, {"limit": limit})
@@ -571,14 +570,14 @@ class HybridRecommendationEngine:
                 "price": r.price_cents / 100,
                 "stock": r.stock,
                 "image_url": None,
-                "score": r.popularity_score,
+                "score": r.popularity_score or 0.5,
                 "signal": "popularity",
             }
             for r in rows
         ]
 
     async def _get_products_by_category(
-        self, category: str | None, limit: int = 8, exclude_ids: list[str] = None
+        self, category: str | None, limit: int = 8, exclude_ids: list[str] | None = None
     ) -> list[dict[str, Any]]:
         """Get products in a category."""
         exclude_ids = exclude_ids or []
@@ -587,15 +586,11 @@ class HybridRecommendationEngine:
             return await self._get_popular_products(limit)
 
         query = text("""
-            SELECT
-                external_product_id, name, category, price_cents,
-                is_active, popularity_score, stock
+            SELECT external_product_id, name, category, price_cents, popularity_score, stock
             FROM recommender.product_embeddings
-            WHERE is_active = true
-            AND category = :category
-            AND external_product_id != ALL(:exclude_ids)
-            AND stock > 0
-            ORDER BY popularity_score DESC
+            WHERE is_active = true AND category = :category
+            AND external_product_id != ALL(:exclude_ids) AND stock > 0
+            ORDER BY popularity_score DESC NULLS LAST
             LIMIT :limit
         """)
         result = await self.session.execute(
@@ -612,14 +607,14 @@ class HybridRecommendationEngine:
                 "price": r.price_cents / 100,
                 "stock": r.stock,
                 "image_url": None,
-                "score": r.popularity_score,
+                "score": r.popularity_score or 0.5,
                 "signal": "category",
             }
             for r in rows
         ]
 
     def _cosine_similarity(self, vec1: list[float], vec2: list[float]) -> float:
-        """Calculate cosine similarity."""
+        """Calculate cosine similarity between two vectors."""
         dot_product = sum(a * b for a, b in zip(vec1, vec2))
         norm1 = math.sqrt(sum(a * a for a in vec1))
         norm2 = math.sqrt(sum(b * b for b in vec2))

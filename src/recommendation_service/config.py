@@ -17,21 +17,15 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # -------------------------------------------------------------------------
-    # Application Settings
-    # -------------------------------------------------------------------------
     app_name: str = "reemio-recommender"
     app_env: Literal["development", "staging", "production", "test"] = "development"
     debug: bool = False
     log_level: str = "INFO"
 
-    # -------------------------------------------------------------------------
-    # API Settings
-    # -------------------------------------------------------------------------
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     api_workers: int = 4
-    cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
+    cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000", "http://localhost:8080", "http://127.0.0.1:8080", "*"])
 
     @field_validator("cors_origins", mode="before")
     @classmethod
@@ -40,16 +34,10 @@ class Settings(BaseSettings):
             return [origin.strip() for origin in v.split(",")]
         return v
 
-    # -------------------------------------------------------------------------
-    # E-Commerce API Integration
-    # -------------------------------------------------------------------------
     ecommerce_api_base_url: str = "https://gateway-ecommerce.reemioltd.com"
     ecommerce_api_key: str = ""
     ecommerce_api_timeout: int = 30
 
-    # -------------------------------------------------------------------------
-    # PostgreSQL Database
-    # -------------------------------------------------------------------------
     postgres_host: str = "localhost"
     postgres_port: int = 5432
     postgres_user: str = "reemio"
@@ -72,15 +60,9 @@ class Settings(BaseSettings):
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
 
-    # -------------------------------------------------------------------------
-    # Vector Search (pgvector)
-    # -------------------------------------------------------------------------
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_dimension: int = 384
 
-    # -------------------------------------------------------------------------
-    # Redis
-    # -------------------------------------------------------------------------
     redis_host: str = "localhost"
     redis_port: int = 6379
     redis_password: str = ""
@@ -92,10 +74,6 @@ class Settings(BaseSettings):
         if self.redis_password:
             return f"redis://:{self.redis_password}@{self.redis_host}:{self.redis_port}/{self.redis_db}"
         return f"redis://{self.redis_host}:{self.redis_port}/{self.redis_db}"
-
-    # -------------------------------------------------------------------------
-    # Celery
-    # -------------------------------------------------------------------------
     celery_broker_url: str = ""
     celery_result_backend: str = ""
 

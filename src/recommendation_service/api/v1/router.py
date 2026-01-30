@@ -11,7 +11,6 @@ from recommendation_service.api.v1 import (
 
 api_router = APIRouter()
 
-# Include all routers
 api_router.include_router(
     health.router,
     tags=["Health"],
