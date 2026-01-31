@@ -2,13 +2,18 @@
 
 import structlog
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from recommendation_service.api.v1.router import api_router
 from recommendation_service.config import get_settings
+
+FRONTEND_DIR = Path(__file__).parent.parent.parent.parent / "frontend"
 
 structlog.configure(
     processors=[
@@ -51,9 +56,9 @@ def create_app() -> FastAPI:
         title="Reemio Recommender API",
         description="E-commerce recommendation system providing personalized product recommendations",
         version="1.0.0",
-        docs_url="/api/docs" if settings.debug else None,
-        redoc_url="/api/redoc" if settings.debug else None,
-        openapi_url="/api/openapi.json" if settings.debug else None,
+        docs_url="/docs",
+        redoc_url="/redoc",
+        openapi_url="/openapi.json",
         lifespan=lifespan,
     )
 
@@ -66,6 +71,17 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(api_router, prefix="/api/v1")
+
+    if FRONTEND_DIR.exists():
+        app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+
+        @app.get("/")
+        async def serve_frontend():
+            return FileResponse(FRONTEND_DIR / "index.html")
+
+        @app.get("/app")
+        async def serve_app():
+            return FileResponse(FRONTEND_DIR / "index.html")
 
     return app
 

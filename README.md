@@ -258,6 +258,114 @@ Without user data:
 - Falls back to popularity-based recommendations
 - Still provides relevant results based on product embeddings
 
+## Data Model
+
+### User Interactions
+
+The recommendation engine tracks user interactions to build personalized preferences. Each interaction includes behavioral signals and engagement metrics.
+
+#### Interaction Types
+
+| Type | Weight | Description |
+|------|--------|-------------|
+| `PURCHASE` | 5.0 | User purchased the product |
+| `CART_ADD` | 3.0 | Added to shopping cart |
+| `WISHLIST_ADD` | 2.0 | Added to wishlist/saved |
+| `RECOMMENDATION_CLICK` | 1.5 | Clicked on a recommendation |
+| `VIEW` | 1.0 | Viewed product page |
+| `RECOMMENDATION_VIEW` | 0.5 | Saw recommendation (impression) |
+| `CART_REMOVE` | -1.0 | Removed from cart (negative signal) |
+| `SEARCH` | - | Search query (used for intent analysis) |
+
+#### Engagement Metrics
+
+Each interaction captures time-based engagement data:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `timeOnPageSeconds` | int | Time spent on the page (5-300s typical) |
+| `sessionDurationSeconds` | int | Total session length (60-1800s) |
+| `scrollDepthPercent` | int | How far user scrolled (10-100%) |
+| `sessionId` | string | Groups interactions within a session |
+| `device` | string | Device type: desktop, mobile, tablet |
+
+#### Recommendation Attribution
+
+For recommendation-driven interactions:
+
+| Field | Description |
+|-------|-------------|
+| `recommendation_context` | Where shown: homepage, product_page, cart, email |
+| `recommendation_position` | Position in the recommendation list (1-N) |
+| `recommendation_request_id` | UUID linking impression → click → conversion |
+
+#### Search Interactions
+
+Search events include query and filter data:
+
+```json
+{
+  "search_query": "wireless headphones",
+  "extra_data": {
+    "filters": {"category": "Electronics", "price_max": 5000},
+    "resultsCount": 42,
+    "timeOnPageSeconds": 25
+  }
+}
+```
+
+### Preference Computation
+
+User preferences are aggregated from interactions using:
+
+1. **Weighted Scoring**: Higher-value interactions (purchases) count more
+2. **Recency Decay**: `weight × exp(-days / 30)` - recent interactions matter more
+3. **Embedding Aggregation**: Product embeddings are averaged, weighted by interaction strength
+4. **Category Analysis**: Top categories extracted for context-aware reranking
+
+### Seeding Test Data
+
+Generate realistic dummy data for testing:
+
+```bash
+# Seed user interactions and events
+uv run python scripts/seed_dummy_data.py
+
+# Build user preference embeddings from interactions
+uv run python scripts/update_preferences.py
+```
+
+This creates:
+- 80+ events in `public.events`
+- 200+ interactions in `recommender.user_interactions`
+- User personas with realistic behavior patterns
+- Time-based engagement metrics
+
+### Demo User Profiles
+
+The seeded data includes users with distinct shopping personas:
+
+| Name | Persona | Top Categories | Price Range | Interactions |
+|------|---------|----------------|-------------|--------------|
+| **Wanjiku Muthoni** | Power Shopper | Sports, Garden, Electronics | $1.50 - $591 | 101 |
+| **Otieno Ochieng** | Browser | Electronics, Office, Garden | $1.40 - $1,186 | 101 |
+| **Kipchoge Korir** | Search Heavy | Home & Kitchen, Garden, Toys | $1.90 - $1,017 | 73 |
+| **Chebet Jepkosgei** | Reco Responder | Sports, Garden, Fashion | $3.60 - $512 | 68 |
+| **Nyambura Wangari** | Search Heavy | Fashion, Office, Electronics | $1.80 - $1,017 | 67 |
+| **Mutua Kioko** | Light User | Sports, Home & Kitchen, Electronics | $1.90 - $1,017 | 66 |
+| **Kimani Njoroge** | Light User | Office, Sports, Electronics | $1.90 - $708 | 54 |
+| **Omondi Onyango** | Reco Responder | Grocery, Fashion, Home & Kitchen | $1.40 - $571 | 54 |
+| **Nafula Wekesa** | Light User | Sports, Home & Kitchen, Beauty | $4.10 - $1,017 | 40 |
+| **Akinyi Adhiambo** | Cart Abandoner | Electronics, Home & Kitchen, Office | $3.60 - $756 | 36 |
+
+**Persona Behaviors:**
+- **Power Shopper**: High purchase rate, frequent views, responds to recommendations
+- **Browser**: Many page views, few cart adds, extensive browsing sessions
+- **Cart Abandoner**: Adds to cart frequently but rarely completes purchase
+- **Search Heavy**: Uses search extensively with filters, discovery-focused
+- **Reco Responder**: High click-through on recommendations, trusts the system
+- **Light User**: Minimal interactions, cold-start scenario for testing
+
 ## Email Workflows
 
 | Trigger | Conditions | Email Type |

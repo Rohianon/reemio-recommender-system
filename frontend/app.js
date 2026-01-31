@@ -1,7 +1,7 @@
-const API_BASE_URL = 'http://localhost:8000/api/v1';
+const API_BASE_URL = '/api/v1';
 
 const state = {
-    currentUser: 'user_alice',
+    currentUser: '805b5c8c-ac76-4422-803b-80151c911fd3',
     cart: [],
     selectedProduct: null
 };
@@ -153,7 +153,7 @@ async function loadHomepageRecommendations() {
             .join('');
     } catch (error) {
         console.error('Error loading products:', error);
-        elements.homepageProducts.innerHTML = '<div class="loading">Error loading products. Make sure the API is running at http://localhost:8000</div>';
+        elements.homepageProducts.innerHTML = '<div class="loading">Error loading products. Make sure the API is running.</div>';
     }
 }
 

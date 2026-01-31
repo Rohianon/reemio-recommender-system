@@ -48,7 +48,7 @@ class UserPreferenceService:
         Returns:
             Summary of the operation
         """
-        cutoff_date = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+        cutoff_date = datetime.now() - timedelta(days=lookback_days)
 
         # Get user interactions with product embeddings
         query = text("""
