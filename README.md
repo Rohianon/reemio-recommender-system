@@ -93,7 +93,7 @@ uv run alembic upgrade head
 uv run python -m scripts.sync_products
 ```
 
-### Start the API Server
+### Start the Server
 
 ```bash
 # Development mode with auto-reload
@@ -103,16 +103,14 @@ uv run uvicorn src.recommendation_service.main:app --reload --host 0.0.0.0 --por
 make run-api
 ```
 
-### Start the Frontend
+The server serves everything from one host:
 
-```bash
-# Serve the frontend (in a separate terminal)
-cd frontend
-python3 -m http.server 8080
-
-# Open in browser
-open http://localhost:8080
-```
+| URL | Description |
+|-----|-------------|
+| http://localhost:8000/ | Frontend demo |
+| http://localhost:8000/docs | Swagger API docs |
+| http://localhost:8000/redoc | ReDoc API docs |
+| http://localhost:8000/api/v1/* | API endpoints |
 
 ## API Endpoints
 
