@@ -24,14 +24,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder --chown=reemio:reemio /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
 
-COPY src/ ./src/
-COPY frontend/ ./frontend/
-COPY alembic.ini ./
-
-RUN chown -R reemio:reemio /app
+COPY --chown=reemio:reemio src/ ./src/
+COPY --chown=reemio:reemio frontend/ ./frontend/
+COPY --chown=reemio:reemio alembic.ini ./
 
 USER reemio
 
