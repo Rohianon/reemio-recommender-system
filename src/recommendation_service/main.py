@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 from recommendation_service.api.v1.router import api_router
 from recommendation_service.config import get_settings
 
-FRONTEND_DIR = Path(__file__).parent.parent.parent.parent / "frontend"
+FRONTEND_DIR = Path(__file__).parent.parent.parent / "frontend"
 
 structlog.configure(
     processors=[
