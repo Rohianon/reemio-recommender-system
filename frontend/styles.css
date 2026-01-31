@@ -233,7 +233,16 @@ body {
 }
 
 .products-grid.horizontal {
-    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+}
+
+.products-grid.horizontal .product-footer {
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.products-grid.horizontal .product-price {
+    font-size: 1.25rem;
 }
 
 .product-card {
