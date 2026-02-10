@@ -114,6 +114,13 @@ class Settings(BaseSettings):
     sync_orders_interval_minutes: int = 30
 
     # -------------------------------------------------------------------------
+    # Database Pool
+    # -------------------------------------------------------------------------
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    db_pool_recycle: int = 1800  # 30 minutes
+
+    # -------------------------------------------------------------------------
     # Cache TTLs (seconds)
     # -------------------------------------------------------------------------
     cache_user_embedding_ttl: int = 3600  # 1 hour
