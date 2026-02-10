@@ -11,6 +11,7 @@ import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from recommendation_service.infrastructure.redis import CacheService
 from recommendation_service.services.embedding import EmbeddingService
 from recommendation_service.services.reranker import RerankerService
 
@@ -24,8 +25,14 @@ class HybridRecommendationEngine:
     COLLABORATIVE_WEIGHT = 0.3
     POPULARITY_WEIGHT = 0.2
 
-    def __init__(self, session: AsyncSession, enable_reranking: bool = True):
+    def __init__(
+        self,
+        session: AsyncSession,
+        cache: CacheService | None = None,
+        enable_reranking: bool = True,
+    ):
         self.session = session
+        self.cache = cache
         self.embedding_service = EmbeddingService(session)
         self.reranker = RerankerService() if enable_reranking else None
 
@@ -342,7 +349,13 @@ class HybridRecommendationEngine:
         return [c for c in candidates if c.get("stock", 1) > 0]
 
     async def _get_user_embedding(self, user_id: str) -> list[float] | None:
-        """Get user preference embedding."""
+        """Get user preference embedding (cached for 1 hour)."""
+        cache_key = f"user_emb:{user_id}"
+        if self.cache:
+            cached = await self.cache.get(cache_key)
+            if cached is not None:
+                return cached
+
         query = text("""
             SELECT embedding
             FROM recommender.user_preference_embeddings
@@ -352,13 +365,20 @@ class HybridRecommendationEngine:
         row = result.fetchone()
 
         if row and row.embedding:
-            if isinstance(row.embedding, str):
-                return orjson.loads(row.embedding)
-            return row.embedding
+            embedding = orjson.loads(row.embedding) if isinstance(row.embedding, str) else row.embedding
+            if self.cache:
+                await self.cache.set(cache_key, embedding, ttl_seconds=3600)
+            return embedding
         return None
 
     async def _get_user_preference_data(self, user_id: str) -> dict[str, Any]:
-        """Get user preference data."""
+        """Get user preference data (cached for 1 hour)."""
+        cache_key = f"user_prefs:{user_id}"
+        if self.cache:
+            cached = await self.cache.get(cache_key)
+            if cached is not None:
+                return cached
+
         query = text("""
             SELECT top_categories, avg_price_min, avg_price_max
             FROM recommender.user_preference_embeddings
@@ -367,16 +387,20 @@ class HybridRecommendationEngine:
         result = await self.session.execute(query, {"user_id": user_id})
         row = result.fetchone()
 
+        empty = {"top_categories": [], "avg_price_min": None, "avg_price_max": None}
         if row:
             top_categories = row.top_categories
             if isinstance(top_categories, str):
                 top_categories = orjson.loads(top_categories)
-            return {
+            data = {
                 "top_categories": top_categories or [],
                 "avg_price_min": row.avg_price_min,
                 "avg_price_max": row.avg_price_max,
             }
-        return {"top_categories": [], "avg_price_min": None, "avg_price_max": None}
+            if self.cache:
+                await self.cache.set(cache_key, data, ttl_seconds=3600)
+            return data
+        return empty
 
     async def _get_collaborative_candidates(
         self, user_id: str, limit: int = 25
@@ -575,7 +599,13 @@ class HybridRecommendationEngine:
         return scored[:limit]
 
     async def _get_popular_products(self, limit: int = 12) -> list[dict[str, Any]]:
-        """Get popular products as fallback."""
+        """Get popular products as fallback (cached for 5 minutes)."""
+        cache_key = f"popular:{limit}"
+        if self.cache:
+            cached = await self.cache.get(cache_key)
+            if cached is not None:
+                return cached
+
         query = text("""
             SELECT external_product_id, name, category, price_cents, popularity_score, stock
             FROM recommender.product_embeddings
@@ -586,7 +616,7 @@ class HybridRecommendationEngine:
         result = await self.session.execute(query, {"limit": limit})
         rows = result.fetchall()
 
-        return [
+        products = [
             {
                 "product_id": str(r.external_product_id),
                 "external_product_id": r.external_product_id,
@@ -600,6 +630,11 @@ class HybridRecommendationEngine:
             }
             for r in rows
         ]
+
+        if self.cache and products:
+            await self.cache.set(cache_key, products, ttl_seconds=1800)
+
+        return products
 
     async def _get_products_by_category(
         self, category: str | None, limit: int = 8, exclude_ids: list[str] | None = None

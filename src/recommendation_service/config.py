@@ -114,6 +114,13 @@ class Settings(BaseSettings):
     sync_orders_interval_minutes: int = 30
 
     # -------------------------------------------------------------------------
+    # Cache TTLs (seconds)
+    # -------------------------------------------------------------------------
+    cache_user_embedding_ttl: int = 3600  # 1 hour
+    cache_popular_products_ttl: int = 1800  # 30 minutes (aligned with order sync)
+    cache_user_preference_ttl: int = 3600  # 1 hour
+
+    # -------------------------------------------------------------------------
     # Recommendation Settings
     # -------------------------------------------------------------------------
     default_recommendation_limit: int = 12
