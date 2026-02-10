@@ -1,12 +1,12 @@
 """Hybrid recommendation engine with 4-stage pipeline."""
 
-import json
-import math
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+import numpy as np
+import orjson
 import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -353,7 +353,7 @@ class HybridRecommendationEngine:
 
         if row and row.embedding:
             if isinstance(row.embedding, str):
-                return json.loads(row.embedding)
+                return orjson.loads(row.embedding)
             return row.embedding
         return None
 
@@ -370,7 +370,7 @@ class HybridRecommendationEngine:
         if row:
             top_categories = row.top_categories
             if isinstance(top_categories, str):
-                top_categories = json.loads(top_categories)
+                top_categories = orjson.loads(top_categories)
             return {
                 "top_categories": top_categories or [],
                 "avg_price_min": row.avg_price_min,
@@ -489,7 +489,7 @@ class HybridRecommendationEngine:
         if row:
             embedding = row.embedding
             if isinstance(embedding, str):
-                embedding = json.loads(embedding)
+                embedding = orjson.loads(embedding)
 
             return {
                 "id": row.id,
@@ -508,7 +508,7 @@ class HybridRecommendationEngine:
     async def _search_similar_products(
         self, query_embedding: list[float], limit: int = 12, exclude_ids: list[str] | None = None
     ) -> list[dict[str, Any]]:
-        """Search for products similar to query embedding using cosine similarity."""
+        """Search for products similar to query embedding using vectorized cosine similarity."""
         exclude_ids = exclude_ids or []
         candidate_limit = min(limit * 10, 200)
 
@@ -526,13 +526,38 @@ class HybridRecommendationEngine:
         )
         rows = result.fetchall()
 
-        scored = []
+        # Parse embeddings and filter valid candidates
+        query_vec = np.array(query_embedding, dtype=np.float32)
+        query_norm = np.linalg.norm(query_vec)
+        if query_norm == 0:
+            return []
+
+        candidates = []
+        embeddings_list = []
         for row in rows:
             embedding = row.embedding
             if isinstance(embedding, str):
-                embedding = json.loads(embedding)
+                embedding = orjson.loads(embedding)
             if isinstance(embedding, list) and embedding:
-                similarity = self._cosine_similarity(query_embedding, embedding)
+                candidates.append(row)
+                embeddings_list.append(embedding)
+
+        if not embeddings_list:
+            return []
+
+        # Batch cosine similarity: (N, 384) @ (384,) / (norms * query_norm)
+        emb_matrix = np.array(embeddings_list, dtype=np.float32)
+        norms = np.linalg.norm(emb_matrix, axis=1)
+        valid_mask = norms > 0
+        similarities = np.zeros(len(embeddings_list), dtype=np.float32)
+        similarities[valid_mask] = (
+            emb_matrix[valid_mask] @ query_vec / (norms[valid_mask] * query_norm)
+        )
+
+        # Build scored list from valid results
+        scored = []
+        for i, row in enumerate(candidates):
+            if valid_mask[i]:
                 scored.append({
                     "product_id": str(row.external_product_id),
                     "external_product_id": row.external_product_id,
@@ -541,7 +566,7 @@ class HybridRecommendationEngine:
                     "price": row.price_cents / 100,
                     "stock": row.stock,
                     "image_url": None,
-                    "score": similarity,
+                    "score": float(similarities[i]),
                     "popularity_score": row.popularity_score,
                     "signal": "content",
                 })
@@ -614,30 +639,20 @@ class HybridRecommendationEngine:
         ]
 
     def _cosine_similarity(self, vec1: list[float], vec2: list[float]) -> float:
-        """Calculate cosine similarity between two vectors."""
-        dot_product = sum(a * b for a, b in zip(vec1, vec2))
-        norm1 = math.sqrt(sum(a * a for a in vec1))
-        norm2 = math.sqrt(sum(b * b for b in vec2))
-
-        if norm1 == 0 or norm2 == 0:
+        """Calculate cosine similarity between two vectors using numpy."""
+        a = np.array(vec1, dtype=np.float32)
+        b = np.array(vec2, dtype=np.float32)
+        norm_a = np.linalg.norm(a)
+        norm_b = np.linalg.norm(b)
+        if norm_a == 0 or norm_b == 0:
             return 0.0
-
-        return dot_product / (norm1 * norm2)
+        return float(np.dot(a, b) / (norm_a * norm_b))
 
     def _aggregate_embeddings(self, embeddings: list[list[float]]) -> list[float]:
-        """Aggregate embeddings by averaging."""
+        """Aggregate embeddings by averaging using numpy."""
         if not embeddings:
             return []
-
-        dim = len(embeddings[0])
-        aggregated = [0.0] * dim
-
-        for emb in embeddings:
-            for i, val in enumerate(emb):
-                aggregated[i] += val
-
-        n = len(embeddings)
-        return [v / n for v in aggregated]
+        return np.mean(np.array(embeddings, dtype=np.float32), axis=0).tolist()
 
     def _empty_response(
         self, request_id: str, context: str, user_id: str | None
