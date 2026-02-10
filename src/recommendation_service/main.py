@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse
 from recommendation_service.api.v1.router import api_router
 from recommendation_service.config import get_settings
 from recommendation_service.infrastructure.redis import close_redis
+from recommendation_service.middleware.timing import TimingMiddleware
 
 FRONTEND_DIR = Path(__file__).parent.parent.parent / "frontend"
 
@@ -64,6 +65,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    app.add_middleware(TimingMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
