@@ -4,6 +4,8 @@ from fastapi import APIRouter
 
 from recommendation_service.api.v1 import (
     analytics,
+    benchmarks,
+    evaluation,
     health,
     interactions,
     recommendations,
@@ -32,4 +34,16 @@ api_router.include_router(
     analytics.router,
     prefix="/analytics",
     tags=["Analytics"],
+)
+
+api_router.include_router(
+    evaluation.router,
+    prefix="/evaluation",
+    tags=["Evaluation"],
+)
+
+api_router.include_router(
+    benchmarks.router,
+    prefix="/benchmarks",
+    tags=["Benchmarks"],
 )
